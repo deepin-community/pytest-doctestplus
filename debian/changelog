@@ -1,5 +1,179 @@
-template-repository (1.0-1) unstable; urgency=medium
+pytest-doctestplus (1.0.0-1) unstable; urgency=medium
 
-  * Initial release
+  * New upstream version 1.0.0
+  * Add numpy to test dependencies
 
- -- Tsic404 <liuheng@deepin.org>  Sat, 28 Jan 2023 13:46:49 +0800
+ -- Ole Streicher <olebole@debian.org>  Fri, 11 Aug 2023 19:56:37 +0200
+
+pytest-doctestplus (0.13.0-1) unstable; urgency=medium
+
+  * Update project homepage
+  * New upstream version 0.13.0
+  * Push Standards-Version to 4.6.2. No changes needed
+
+ -- Ole Streicher <olebole@debian.org>  Thu, 22 Jun 2023 16:50:31 +0200
+
+pytest-doctestplus (0.12.1-1) unstable; urgency=medium
+
+  * New upstream version 0.12.1
+
+ -- Ole Streicher <olebole@debian.org>  Tue, 27 Sep 2022 18:01:57 +0200
+
+pytest-doctestplus (0.12.0-2) unstable; urgency=medium
+
+  * Add version.py to d/clean (Closes: #1015072)
+  * Push Standards-Version to 4.6.1. No changes needed
+
+ -- Ole Streicher <olebole@debian.org>  Sun, 17 Jul 2022 11:57:46 +0200
+
+pytest-doctestplus (0.12.0-1) unstable; urgency=medium
+
+  * New upstream version 0.12.0
+
+ -- Ole Streicher <olebole@debian.org>  Wed, 02 Mar 2022 09:45:44 +0100
+
+pytest-doctestplus (0.11.2-1) unstable; urgency=medium
+
+  * New upstream version 0.11.2
+
+ -- Ole Streicher <olebole@debian.org>  Tue, 14 Dec 2021 07:52:40 +0100
+
+pytest-doctestplus (0.11.1-1) unstable; urgency=medium
+
+  * New upstream version 0.11.1
+  * Make autopkgtests dependent on python3-all
+
+ -- Ole Streicher <olebole@debian.org>  Fri, 19 Nov 2021 08:42:48 +0100
+
+pytest-doctestplus (0.11.0-2) unstable; urgency=medium
+
+  * Team Upload.
+  * Run autopkgtests outside the source package to use the installed module
+    (Closes: #995737)
+  * Run autopkgtests against all supported Python 3 versions.
+
+ -- Stefano Rivera <stefanor@debian.org>  Tue, 12 Oct 2021 12:34:41 -0700
+
+pytest-doctestplus (0.11.0-1) unstable; urgency=medium
+
+  * New upstream version 0.11.0
+
+ -- Ole Streicher <olebole@debian.org>  Thu, 23 Sep 2021 07:45:17 +0200
+
+pytest-doctestplus (0.10.1-2) unstable; urgency=medium
+
+  * Add pytest-remotedata to test dependencies and to Recommends
+
+ -- Ole Streicher <olebole@debian.org>  Mon, 30 Aug 2021 07:41:14 +0200
+
+pytest-doctestplus (0.10.1-1) unstable; urgency=medium
+
+  * New upstream version 0.10.1
+  * Push Standards-Version to 4.6.0. No changes needed
+
+ -- Ole Streicher <olebole@debian.org>  Tue, 24 Aug 2021 15:14:38 +0200
+
+pytest-doctestplus (0.9.0-1) unstable; urgency=medium
+
+  * New upstream version 0.9.0
+  * Push Standards-Version to 4.5.1. No changes needed
+  * Adjust build dependencies
+
+ -- Ole Streicher <olebole@debian.org>  Sun, 17 Jan 2021 15:35:03 +0100
+
+pytest-doctestplus (0.7.0-2) unstable; urgency=medium
+
+  [ Ondřej Nový ]
+  * d/control: Update Maintainer field with new Debian Python Team
+    contact address.
+  * d/control: Update Vcs-* fields with new Debian Python Team Salsa
+    layout.
+
+  [ Debian Janitor ]
+  * Set upstream metadata fields: Bug-Database, Bug-Submit, Repository,
+    Repository-Browse.
+
+  [ Ole Streicher ]
+  * Compatibility with pytest 6.0.0 (Closes: #977110)
+  * Add "Rules-Requires-Root: no" to d/control
+
+ -- Ole Streicher <olebole@debian.org>  Fri, 11 Dec 2020 10:35:14 +0100
+
+pytest-doctestplus (0.7.0-1) unstable; urgency=low
+
+  * New upstream version 0.7.0
+  * Ignore ImportMismatError on CI test
+
+ -- Ole Streicher <olebole@debian.org>  Fri, 22 May 2020 11:50:06 +0200
+
+pytest-doctestplus (0.6.1-1) unstable; urgency=low
+
+  * New upstream version 0.6.1
+  * Push Standards-Version to 4.5.0. No changes needed.
+  * Push compat to 13
+
+ -- Ole Streicher <olebole@debian.org>  Sun, 10 May 2020 15:24:00 +0200
+
+pytest-doctestplus (0.5.0-2) unstable; urgency=low
+
+  * No longer require Numpy
+  * Add pip-3 dependency
+
+ -- Ole Streicher <olebole@debian.org>  Wed, 20 Nov 2019 21:26:14 +0100
+
+pytest-doctestplus (0.5.0-1) unstable; urgency=low
+
+  [ Ondřej Nový ]
+  * Bump Standards-Version to 4.4.1.
+
+  [ Ole Streicher ]
+  * New upstream version 0.5.0
+
+ -- Ole Streicher <olebole@debian.org>  Wed, 20 Nov 2019 21:04:26 +0100
+
+pytest-doctestplus (0.4.0-1) unstable; urgency=low
+
+  [ Ondřej Nový ]
+  * Use debhelper-compat instead of debian/compat.
+
+  [ Ole Streicher ]
+  * New upstream version 0.4.0
+  * Add gitlab-ci.yml for salsa
+
+ -- Ole Streicher <olebole@debian.org>  Fri, 20 Sep 2019 11:08:35 +0200
+
+pytest-doctestplus (0.3.0-1) unstable; urgency=medium
+
+  * Fix maintainer (DPMT) email address
+  * Move VCS to DPMT
+  * New upstream version 0.3.0
+  * Push Standards-Version to 4.4.0. No changes required.
+  * Push compat to 12
+
+ -- Ole Streicher <olebole@debian.org>  Wed, 17 Jul 2019 22:21:02 +0200
+
+pytest-doctestplus (0.2.0-1) unstable; urgency=low
+
+  * New upstream version 0.2.0
+  * Push Standards-Version to 4.2.1. No changes needed.
+
+ -- Ole Streicher <olebole@debian.org>  Tue, 20 Nov 2018 16:01:29 +0100
+
+pytest-doctestplus (0.1.3-1) unstable; urgency=medium
+
+  * New upstream version 0.1.3
+  * Push Standards-Version to 4.1.4. No changes needed.
+
+ -- Ole Streicher <olebole@debian.org>  Sat, 21 Apr 2018 10:43:20 +0200
+
+pytest-doctestplus (0.1.2-2) unstable; urgency=low
+
+  * Set Arch:all instead of Arch:any
+
+ -- Ole Streicher <olebole@debian.org>  Sun, 04 Feb 2018 10:05:11 +0100
+
+pytest-doctestplus (0.1.2-1) unstable; urgency=low
+
+  * Initial release. (Closes: #887021)
+
+ -- Ole Streicher <olebole@debian.org>  Tue, 16 Jan 2018 17:08:51 +0100
