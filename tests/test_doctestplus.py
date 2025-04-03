@@ -1,15 +1,28 @@
 import glob
 import os
+from platform import python_version
 from textwrap import dedent
 import sys
+
+from packaging.version import Version
 
 import pytest
 
 import doctest
 from pytest_doctestplus.output_checker import OutputChecker, FLOAT_CMP
 
+try:
+    import pytest_asyncio  # noqa: F401
+    has_pytest_asyncio = True
+except ImportError:
+    has_pytest_asyncio = False
+
+
 
 pytest_plugins = ['pytester']
+
+
+PYTEST_LT_6 = Version(pytest.__version__) < Version('6.0.0')
 
 
 def test_ignored_whitespace(testdir):
@@ -308,7 +321,7 @@ class TestFloats:
         c = OutputChecker()
         got = []
         for char in ['A', 'B', 'C', 'D', 'E']:
-            got.append('%s %s' % (char, float(ord(char))))
+            got.append(f'{char} {float(ord(char))}')
         got = '\n'.join(got)
 
         want = "A 65.0\nB 66.0\n...G 70.0"
@@ -419,6 +432,29 @@ def test_requires(testdir):
         """
     )
     # passed because 'pytest<1.0' was not satisfied and 'assert 0' was not evaluated
+    testdir.inline_run(p, '--doctest-plus', '--doctest-rst').assertoutcome(skipped=1)
+
+
+def test_requires_all(testdir):
+    testdir.makeini(
+        """
+        [pytest]
+        doctestplus = enabled
+    """)
+
+    # should be ignored
+    p = testdir.makefile(
+        '.rst',
+        """
+        .. doctest-requires-all:: foobar
+
+            >>> import foobar
+
+        This is a narrative line, before another doctest snippet
+
+           >>> import foobar
+        """
+    )
     testdir.inline_run(p, '--doctest-plus', '--doctest-rst').assertoutcome(skipped=1)
 
 
@@ -590,6 +626,32 @@ def test_doctest_glob(testdir):
     ).assertoutcome(passed=1)
     testdir.inline_run(
         '--doctest-plus', '--doctest-glob', 'foo_*.txt'
+    ).assertoutcome(passed=1)
+
+
+@pytest.mark.xfail(reason='known issue, fenced code blocks require an extra trailing newline')
+def test_markdown_fenced_code(testdir):
+    testdir.makefile('.md', foo="""\
+```
+>>> 1 + 1
+2
+```
+""")
+    testdir.inline_run(
+        '--doctest-plus', '--doctest-glob', '*.md'
+    ).assertoutcome(passed=1)
+
+
+def test_markdown_fenced_code_with_extra_newline(testdir):
+    testdir.makefile('.md', foo="""\
+```
+>>> 1 + 1
+2
+
+```
+""")
+    testdir.inline_run(
+        '--doctest-plus', '--doctest-glob', '*.md'
     ).assertoutcome(passed=1)
 
 
@@ -769,20 +831,38 @@ def test_doctest_float_replacement(tmp_path):
     )
 
 
-def test_doctest_subpackage_requires(testdir, caplog):
-
-    # Note that each entry below has different whitespace around the = to
-    # make sure that all cases work properly.
-
-    testdir.makeini(
-        """
-        [pytest]
-        doctest_subpackage_requires =
-            test/a/* = pytest>1
-            test/b/*= pytest>1;averyfakepackage>99999.9
-            test/c/*=anotherfakepackage>=22000.1.2
+# Note that each entry under doctest_subpackage_requires has different whitespace
+# around the = to make sure that all cases work properly.
+SUBPACKAGE_REQUIRES_INI = (
+    "makeini",
     """
-    )
+    [pytest]
+    doctest_subpackage_requires =
+        test/a/* = pytest>1
+        test/b/*= pytest>1;averyfakepackage>99999.9
+        test/c/*=anotherfakepackage>=22000.1.2
+    """
+)
+SUBPACKAGE_REQUIRES_PYPROJECT = (
+    "makepyprojecttoml",
+    """
+    [tool.pytest.ini_options]
+    doctest_subpackage_requires = [
+        "test/a/* = pytest>1",
+        "test/b/*= pytest>1;averyfakepackage>99999.9",
+        "test/c/*=anotherfakepackage>=22000.1.2",
+    ]
+    """
+)
+
+
+@pytest.fixture()
+def subpackage_requires_testdir(testdir, request):
+    if request.param[0] == 'makepyprojecttoml' and PYTEST_LT_6:
+        return None, None
+
+    config_file = getattr(testdir, request.param[0])(request.param[1])
+
     test = testdir.mkdir('test')
     a = test.mkdir('a')
     b = test.mkdir('b')
@@ -801,10 +881,44 @@ def test_doctest_subpackage_requires(testdir, caplog):
     b.join('testcode.py').write(pyfile)
     c.join('testcode.py').write(pyfile)
 
-    reprec = testdir.inline_run(test, "--doctest-plus")
+    return config_file, testdir
+
+
+@pytest.mark.parametrize('subpackage_requires_testdir', [SUBPACKAGE_REQUIRES_INI, SUBPACKAGE_REQUIRES_PYPROJECT], indirect=True)
+def test_doctest_subpackage_requires(subpackage_requires_testdir, caplog):
+    config_file, testdir = subpackage_requires_testdir
+    if config_file is None:
+        pytest.skip("pyproject.toml not supported in pytest<6")
+
+    reprec = testdir.inline_run(str(testdir), f"-c={config_file}", "--doctest-plus")
     reprec.assertoutcome(passed=1)
     assert reprec.listoutcomes()[0][0].location[0] == os.path.join('test', 'a', 'testcode.py')
     assert caplog.text == ''
+
+
+@pytest.mark.parametrize(('import_mode', 'expected'), [
+    pytest.param('importlib', dict(passed=2), marks=pytest.mark.skipif(PYTEST_LT_6, reason="importlib import mode not supported on Pytest <6"), id="importlib"),
+    pytest.param('append', dict(failed=1), id="append"),
+    pytest.param('prepend', dict(failed=1), id="prepend"),
+])
+def test_import_mode(testdir, import_mode, expected):
+    """Test that two files with the same name but in different folders work with --import-mode=importlib."""
+    a = testdir.mkdir('a')
+    b = testdir.mkdir('b')
+
+    pyfile = dedent("""
+        def f():
+            '''
+            >>> 1
+            1
+            '''
+    """)
+
+    a.join('testcode.py').write(pyfile)
+    b.join('testcode.py').write(pyfile)
+
+    reprec = testdir.inline_run(str(testdir), "--doctest-plus", f"--import-mode={import_mode}")
+    reprec.assertoutcome(**expected)
 
 
 def test_doctest_skip(testdir):
@@ -824,6 +938,41 @@ def test_doctest_skip(testdir):
         """
     )
     testdir.inline_run(p, '--doctest-plus', '--doctest-rst').assertoutcome(skipped=1)
+
+
+def test_remote_data_all(testdir):
+    testdir.makeini(
+        """
+        [pytest]
+        doctestplus = enabled
+    """)
+
+    p = testdir.makefile(
+        '.rst',
+        """
+        This is a narrative docs, which some of the lines requiring remote-data access.
+        The first code block always passes, the second is skipped without remote data and the
+        last section is skipped due to the all option.
+
+            >>> print("Test")
+            Test
+
+        .. doctest-remote-data-all::
+
+            >>> from contextlib import closing
+            >>> from urllib.request import urlopen
+            >>> with closing(urlopen('https://www.astropy.org')) as remote:
+            ...     remote.read()    # doctest: +IGNORE_OUTPUT
+
+        Narrative before a codeblock that should fail normally but with the all option in the
+        directive it is skipped over thus producing a passing status.
+
+            >>> print(123)
+        """
+    )
+
+    testdir.inline_run(p, '--doctest-plus', '--doctest-rst', '--remote-data').assertoutcome(failed=1)
+    testdir.inline_run(p, '--doctest-plus', '--doctest-rst').assertoutcome(passed=1)
 
 
 # We repeat all testst including remote data with and without it opted in
@@ -1039,6 +1188,30 @@ def test_fail_data_dependency(testdir, cont_on_fail):
     assert ("something()\nUNEXPECTED EXCEPTION: NameError" in report.longreprtext) is cont_on_fail
 
 
+@pytest.mark.xfail(
+        has_pytest_asyncio,
+        reason='pytest_asyncio monkey-patches .collect()')
+def test_main(testdir):
+    pkg = testdir.mkdir('pkg')
+    code = dedent(
+        '''
+        def f():
+            raise RuntimeError("This is a CLI, do not execute module while doctesting")
+
+        f()
+        '''
+    )
+    pkg.join('__init__.py').write_text("", "utf-8")
+    main_path = pkg.join('__main__.py')
+    main_path.write_text(code, "utf-8")
+
+    testdir.inline_run(pkg).assertoutcome(passed=0)
+    testdir.inline_run(pkg, '--doctest-plus').assertoutcome(passed=0)
+
+
+@pytest.mark.xfail(
+        python_version() in ('3.11.9', '3.11.10', '3.11.11', '3.12.3'),
+        reason='broken by https://github.com/python/cpython/pull/115440')
 def test_ufunc(testdir):
     pytest.importorskip('numpy')
 
@@ -1053,7 +1226,18 @@ def test_ufunc(testdir):
             return 1
         """)
     testdir.makepyfile(module2="""
-        from _module2 import foo
+        import functools
+        from _module2 import foo, bar, bat as _bat
+
+
+        def wrap_func(func):
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                return func(*args, **kwargs)
+            return wrapper
+
+
+        bat = wrap_func(_bat)
         """)
     testdir.makepyfile(setup="""
         from setuptools import setup, Extension
@@ -1072,13 +1256,13 @@ def test_ufunc(testdir):
         #include <Python.h>
 
 
-        static double foo_inner(double a, double b)
+        static double ufunc_inner(double a, double b)
         {
             return a + b;
         }
 
 
-        static void foo_loop(
+        static void ufunc_loop(
             char **args,
             const npy_intp *dimensions,
             const npy_intp *steps,
@@ -1087,18 +1271,17 @@ def test_ufunc(testdir):
             const npy_intp n = dimensions[0];
             for (npy_intp i = 0; i < n; i ++)
             {
-                *(double *) &args[2][i * steps[2]] = foo_inner(
+                *(double *) &args[2][i * steps[2]] = ufunc_inner(
                 *(double *) &args[0][i * steps[0]],
                 *(double *) &args[1][i * steps[1]]);
             }
         }
 
 
-        static PyUFuncGenericFunction foo_loops[] = {foo_loop};
-        static char foo_types[] = {NPY_DOUBLE, NPY_DOUBLE, NPY_DOUBLE};
-        static void *foo_data[] = {NULL};
-        static const char foo_name[] = "foo";
-        static const char foo_docstring[] = ">>> foo(1, 2)\n3.0";
+        static PyUFuncGenericFunction ufunc_loops[] = {ufunc_loop};
+        static char ufunc_types[] = {NPY_DOUBLE, NPY_DOUBLE, NPY_DOUBLE};
+        static void *ufunc_data[] = {NULL};
+        static const char ufunc_docstring[] = ">>> foo(1, 2)\n3.0";
 
         static PyModuleDef moduledef = {
             .m_base = PyModuleDef_HEAD_INIT,
@@ -1116,17 +1299,50 @@ def test_ufunc(testdir):
             if (!module)
                 return NULL;
 
-            PyObject *obj = PyUFunc_FromFuncAndData(
-                foo_loops, foo_data, foo_types, 1, 2, 1, PyUFunc_None, foo_name,
-                foo_docstring, 0);
-            if (!obj)
+            /* Add a ufunc _with_ a docstring. */
+            PyObject *foo = PyUFunc_FromFuncAndData(
+                ufunc_loops, ufunc_data, ufunc_types, 1, 2, 1, PyUFunc_None,
+                "foo", ufunc_docstring, 0);
+            if (!foo)
             {
                 Py_DECREF(module);
                 return NULL;
             }
-            if (PyModule_AddObject(module, foo_name, obj) < 0)
+            if (PyModule_AddObject(module, "foo", foo) < 0)
             {
-                Py_DECREF(obj);
+                Py_DECREF(foo);
+                Py_DECREF(module);
+                return NULL;
+            }
+
+            /* Add a ufunc _without_ a docstring. */
+            PyObject *bar = PyUFunc_FromFuncAndData(
+                ufunc_loops, ufunc_data, ufunc_types, 1, 2, 1, PyUFunc_None,
+                "bar", NULL, 0);
+            if (!bar)
+            {
+                Py_DECREF(module);
+                return NULL;
+            }
+            if (PyModule_AddObject(module, "bar", bar) < 0)
+            {
+                Py_DECREF(bar);
+                Py_DECREF(module);
+                return NULL;
+            }
+
+            /* Add another ufunc _without_ a docstring. */
+            PyObject *bat = PyUFunc_FromFuncAndData(
+                ufunc_loops, ufunc_data, ufunc_types, 1, 2, 1, PyUFunc_None,
+                "bat", NULL, 0);
+            if (!bat)
+            {
+                Py_DECREF(module);
+                return NULL;
+            }
+            if (PyModule_AddObject(module, "bat", bat) < 0)
+            {
+                Py_DECREF(bat);
                 Py_DECREF(module);
                 return NULL;
             }
@@ -1142,6 +1358,88 @@ def test_ufunc(testdir):
 
     result = testdir.inline_run(build_dir, '--doctest-plus', '--doctest-modules', '--doctest-ufunc')
     result.assertoutcome(passed=2, failed=0)
+
+
+NORCURSEDIRS_INI = (
+    "makeini",
+    """
+    [pytest]
+    doctest_norecursedirs =
+        "bad_dir"
+        "*/bad_file.py"
+    """
+)
+NORCURSEDIRS_PYPROJECT = (
+    "makepyprojecttoml",
+    """
+    [tool.pytest.ini_options]
+    doctest_norecursedirs = [
+        "bad_dir",
+        "*/bad_file.py",
+    ]
+    """
+)
+
+
+@pytest.fixture()
+def norecursedirs_testdir(testdir, request):
+    if request.param[0] == 'makepyprojecttoml' and PYTEST_LT_6:
+        return None, None
+
+    config_file = getattr(testdir, request.param[0])(request.param[1])
+
+    bad_text = dedent("""
+        def f():
+            '''
+            This should fail doc testing
+            >>> 1
+            2
+            '''
+            pass
+    """)
+
+    good_text = dedent("""
+        def g():
+            '''
+            This should pass doc testing
+            >>> 1
+            1
+            '''
+            pass
+    """)
+
+    # Create a bad file that should be by its folder
+    bad_subdir = testdir.mkdir("bad_dir")
+    bad_file = bad_subdir.join("test_foobar.py")
+    bad_file.write_text(bad_text, "utf-8")
+
+    # Create a bad file that should be skipped by its name
+    okay_subdir1 = testdir.mkdir("okay_foo_dir")
+    bad_file = okay_subdir1.join("bad_file.py")
+    bad_file.write_text(bad_text, "utf-8")
+    # Create a good file in that directory that doctest won't skip
+    good_file1 = okay_subdir1.join("good_file1.py")
+    good_file1.write_text(good_text, "utf-8")
+
+    # Create another bad file that should be skipped by its name
+    okay_subdir2 = testdir.mkdir("okay_bar_dir")
+    bad_file = okay_subdir2.join("bad_file.py")
+    bad_file.write_text(bad_text, "utf-8")
+    # Create a good file in that directory that doctest won't skip
+    good_file2 = okay_subdir2.join("good_file2.py")
+    good_file2.write_text(good_text, "utf-8")
+
+    return config_file, testdir
+
+
+@pytest.mark.parametrize('norecursedirs_testdir', [NORCURSEDIRS_INI, NORCURSEDIRS_PYPROJECT], indirect=True)
+def test_doctest_norecursedirs(norecursedirs_testdir):
+    config_file, testdir = norecursedirs_testdir
+    if config_file is None:
+        pytest.skip("pyproject.toml not supported in pytest<6")
+
+    reprec = testdir.inline_run(str(testdir), f"-c={config_file}", "--doctest-plus")
+    reprec.assertoutcome(passed=2)
 
 
 def test_norecursedirs(testdir):
@@ -1165,3 +1463,78 @@ def test_norecursedirs(testdir):
     """, "utf-8")
     reprec = testdir.inline_run(str(testdir), "--doctest-plus")
     reprec.assertoutcome(failed=0, passed=0)
+
+
+def test_generate_diff_basic(testdir, capsys):
+    p = testdir.makepyfile("""
+        def f():
+            '''
+            >>> print(2)
+            4
+            >>> print(3)
+            5
+            '''
+            pass
+        """)
+    with open(p) as f:
+        original = f.read()
+
+    testdir.inline_run(p, "--doctest-plus-generate-diff")
+    diff = dedent("""
+         >>> print(2)
+    -    4
+    +    2
+         >>> print(3)
+    -    5
+    +    3
+    """)
+    captured = capsys.readouterr()
+    assert diff in captured.out
+
+    testdir.inline_run(p, "--doctest-plus-generate-diff=overwrite")
+    captured = capsys.readouterr()
+    assert "Applied fix to the following files" in captured.out
+
+    with open(p) as f:
+        result = f.read()
+
+    assert result == original.replace("4", "2").replace("5", "3")
+
+
+def test_generate_diff_multiline(testdir, capsys):
+    p = testdir.makepyfile("""
+        def f():
+            '''
+            >>> print(2)
+            2
+            >>> for i in range(4):
+            ...     print(i)
+            1
+            2
+            '''
+            pass
+        """)
+    with open(p) as f:
+        original = f.read()
+
+    testdir.inline_run(p, "--doctest-plus-generate-diff")
+    diff = dedent("""
+         >>> for i in range(4):
+         ...     print(i)
+    +    0
+         1
+         2
+    +    3
+    """)
+    captured = capsys.readouterr()
+    assert diff in captured.out
+
+    testdir.inline_run(p, "--doctest-plus-generate-diff=overwrite")
+    captured = capsys.readouterr()
+    assert "Applied fix to the following files" in captured.out
+
+    with open(p) as f:
+        result = f.read()
+
+    original_fixed = original.replace("1\n    2", "\n    ".join(["0", "1", "2", "3"]))
+    assert result == original_fixed

@@ -1,5 +1,12 @@
 # Licensed under a 3-clause BSD style license - see LICENSE.rst
 
+"""
+Also module level skips should be matched with `*` and `.`, test at least
+the `.` version (the star would match all others too).
+
+>>> import foobar
+"""
+
 __doctest_skip__ = [
     'skip_this_test',
     'ClassWithSomeBadDocTests.this_test_fails',
@@ -7,6 +14,7 @@ __doctest_skip__ = [
 ]
 
 __doctest_requires__ = {
+    '.': ['foobar'],
     'depends_on_foobar': ['foobar'],
     'depends_on_foobar_submodule': ['foobar.baz'],
     'depends_on_two_modules': ['os', 'foobar'],
@@ -72,7 +80,7 @@ def depends_on_two_modules():
     """
 
 
-class ClassWithSomeBadDocTests(object):
+class ClassWithSomeBadDocTests:
     def this_test_works():
         """
         This test should be executed by --doctest-plus and should pass.
@@ -90,7 +98,7 @@ class ClassWithSomeBadDocTests(object):
         """
 
 
-class ClassWithAllBadDocTests(object):
+class ClassWithAllBadDocTests:
     def this_test_fails(self):
         """
         This test will cause a failure if __doctest_skip__ is not working.

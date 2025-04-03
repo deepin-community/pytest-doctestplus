@@ -8,11 +8,13 @@ pyproject.toml
 setup.cfg
 setup.py
 tox.ini
+.github/dependabot.yml
 .github/workflows/publish.yml
 .github/workflows/python-tests.yml
 licenses/README.rst
 licenses/SYMPY_LICENSE.rst
 pytest_doctestplus/__init__.py
+pytest_doctestplus/newhooks.py
 pytest_doctestplus/output_checker.py
 pytest_doctestplus/plugin.py
 pytest_doctestplus/utils.py

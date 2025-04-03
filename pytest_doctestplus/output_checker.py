@@ -43,8 +43,6 @@ class OutputChecker(doctest.OutputChecker):
     rtol = 1e-05
     atol = 1e-08
 
-    _original_output_checker = doctest.OutputChecker
-
     _str_literal_re = re.compile(
         r"(\W|^)[uU]([rR]?[\'\"])", re.UNICODE)
     _byteorder_re = re.compile(
@@ -55,9 +53,6 @@ class OutputChecker(doctest.OutputChecker):
         r"([0-9]+)L", re.UNICODE)
 
     def __init__(self):
-        # NOTE OutputChecker is an old-style class with no __init__ method,
-        # so we can't call the base class version of __init__ here
-
         exp = r'(?:e[+-]?\d+)'
 
         got_floats = (r'\s*([+-]?\d+\.\d*{0}?|'
@@ -72,13 +67,17 @@ class OutputChecker(doctest.OutputChecker):
         front_sep = r'\s|[*+-,<=(\[]'
         back_sep = front_sep + r'|[>j)\]}]'
 
-        fbeg = r'^{}(?={}|$)'.format(got_floats, back_sep)
-        fmidend = r'(?<={}){}(?={}|$)'.format(front_sep, got_floats, back_sep)
-        self.num_got_rgx = re.compile(r'({}|{})'.format(fbeg, fmidend))
+        fbeg = fr'^{got_floats}(?={back_sep}|$)'
+        fmidend = fr'(?<={front_sep}){got_floats}(?={back_sep}|$)'
+        self.num_got_rgx = re.compile(fr'({fbeg}|{fmidend})')
 
-        fbeg = r'^{}(?={}|$)'.format(want_floats, back_sep)
-        fmidend = r'(?<={}){}(?={}|$)'.format(front_sep, want_floats, back_sep)
-        self.num_want_rgx = re.compile(r'({}|{})'.format(fbeg, fmidend))
+        fbeg = fr'^{want_floats}(?={back_sep}|$)'
+        fmidend = fr'(?<={front_sep}){want_floats}(?={back_sep}|$)'
+        self.num_want_rgx = re.compile(fr'({fbeg}|{fmidend})')
+
+        # As of 2023-09-26, Python base class has no init, but just in case
+        # it acquires one.
+        super().__init__()
 
     def do_fixes(self, want, got):
         want = re.sub(self._str_literal_re, r'\1\2', want)
@@ -221,7 +220,7 @@ class OutputChecker(doctest.OutputChecker):
         # blank line, unless the DONT_ACCEPT_BLANKLINE flag is used.
         if not (flags & doctest.DONT_ACCEPT_BLANKLINE):
             # Replace <BLANKLINE> in want with a blank line.
-            want = re.sub(r'(?m)^{}\s*?$'.format(re.escape(doctest.BLANKLINE_MARKER)),
+            want = re.sub(fr'(?m)^{re.escape(doctest.BLANKLINE_MARKER)}\s*?$',
                           '', want)
             # If a line in got contains only spaces, then remove the
             # spaces.
@@ -281,19 +280,13 @@ class OutputChecker(doctest.OutputChecker):
         if flags & FLOAT_CMP:
             return self.normalize_floats(want, got, flags)
 
-        # Can't use super here because doctest.OutputChecker is not a
-        # new-style class.
-        return self._original_output_checker.check_output(
-            self, want, got, flags)
+        return super().check_output(want, got, flags)
 
     def output_difference(self, want, got, flags):
         if flags & FIX:
             want, got = self.do_fixes(want, got)
 
-        # Can't use super here because doctest.OutputChecker is not a
-        # new-style class.
-        return self._original_output_checker.output_difference(
-            self, want, got, flags)
+        return super().output_difference(want, got, flags)
 
 
 try:

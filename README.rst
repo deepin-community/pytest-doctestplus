@@ -41,6 +41,10 @@ providing the following features:
 * optional inclusion of ``*.rst`` files for doctests (see `Setup and Configuration`_)
 * optional inclusion of doctests in docstrings of Numpy ufuncs
 
+Further, ``pytest-doctestplus`` supports editing files to fix incorrect docstrings
+(See `Fixing Existing Docstrings`_).
+
+.. _pytest-remotedata: https://github.com/astropy/pytest-remotedata
 
 Installation
 ------------
@@ -61,6 +65,10 @@ In either case, the plugin will automatically be registered for use with
 
 Usage
 -----
+
+Note: In lieu of ``setup.cfg``, ``pyproject.toml`` configuration is also
+supported; where ``setup.cfg`` is mentioned below, replace the syntax
+with TOML equivalent.
 
 .. _setup:
 
@@ -101,6 +109,23 @@ plugin and are set in ``doctest_optionflags`` in ``setup.cfg``. By default,
 ``ELLIPSIS`` and ``NORMALIZE_WHITESPACE`` are used. For a description of all
 doctest settings, see the `doctest documentation
 <https://docs.python.org/3/library/doctest.html#option-flags>`_.
+
+Running Tests in Markdown Files
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+To run doctests in Markdown files, invoke pytest with the command line options
+``--doctest-plus --doctest-glob '*.md'``.
+
+If you write doctests inside `GitHub-style triple backtick fenced code blocks
+<https://docs.github.com/en/get-started/writing-on-github/working-with-advanced-formatting/creating-and-highlighting-code-blocks#fenced-code-blocks>`_,
+then in order for pytest-doctest to find and run them you need to include an
+extra trailing newline inside your code blocks, like this::
+
+    ```pycon
+    >>> 1 + 2
+    2
+
+    ```
 
 Doctest Directives
 ~~~~~~~~~~~~~~~~~~
@@ -311,6 +336,9 @@ the package's ``setup.cfg`` file. The syntax for this option is a list of
 
 Multiple requirements can be specified if separated by semicolons.
 
+It is also possible to conditionally skip all the doctests in a narrative
+documentation with ``doctest-requires-all``.
+
 Remote Data
 ~~~~~~~~~~~
 
@@ -355,6 +383,54 @@ with sphinx. Doing so ensures that sphinx correctly ignores these directives,
 running the doctests with sphinx is not supported. To do this, add
 ``'pytest_doctestplus.sphinx.doctestplus'`` to your ``extensions`` list in your
 ``conf.py`` file.
+
+
+Fixing Existing Docstrings
+--------------------------
+The plugin has basic support to fix docstrings, this can be enabled by
+running ``pytest`` with ``--doctest-plus-generate-diff``.
+Without further options, this will print out a diff and a list of files that
+would be modified.  Using ``--doctest-plus-generate-diff=overwrite`` will
+modify the files in-place, so it is recommended to run the check first to
+verify the paths.
+You may wish to review changes manually and only commit some patches e.g. using ``git commit --patch``.
+
+The current diff generation is still very basic, for example, it does not account for
+existing ``...``.  By default a diff is only generated for *failing* doctests.
+
+In general, a mass edit may wish to focus on a specific change and
+possibly include passing tests.  So you can opt-in into the behavior by
+adding a hook to your ``conftest.py``::
+
+    @pytest.hookimpl
+    def pytest_doctestplus_diffhook(info):
+        info["use"] = True  # Overwrite all results (even successes)
+        if info["fileno"] is None:
+            # E.g. NumPy has C docstrings that cannot be found, we can add
+            # custom logic here to try and find these:
+            info["filename"] = ...
+            info["lineno"] = ...
+
+Where ``info`` is a dictionary containing the following items:
+
+* ``use``: ``True`` or ``False`` signalling whether to apply the diff.  This is
+  set to ``False`` if a doctest succeeded and ``True`` if the doctest failed.
+* ``name``: The name of the test (e.g. the function being documented)
+* ``filename``: The file that contains the test (this can be wrong in certain
+  situation and in that case ``test_lineno`` will be wrong as well).
+* ``source``: The source code that was executed for this test
+* ``test_lineno``: The line of code where the example block (or function) starts.
+  In some cases, the test file cannot be found and the lineno will be ``None``,
+  you can manually try to fix these.
+* ``example_lineno``: The line number of the example snippet
+  (individual ``>>>``).
+* ``want``: The current documentation.
+* ``got``: The result of executing the example.
+
+You can modify the dictionary in-place to modify the behavior.
+
+Please note that we assume that this API will be used only occasionally and
+reserve the right to change it at any time.
 
 
 Development Status

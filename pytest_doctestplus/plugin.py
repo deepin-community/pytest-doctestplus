@@ -1,4 +1,5 @@
 # Licensed under a 3-clause BSD style license - see LICENSE.rst
+
 """
 This plugin provides advanced doctest support and enables the testing of .rst
 files.
@@ -8,8 +9,11 @@ import fnmatch
 import os
 import re
 import sys
+import tempfile
 import warnings
+from collections import defaultdict
 from pathlib import Path
+import subprocess
 from textwrap import indent
 from unittest import SkipTest
 
@@ -27,9 +31,11 @@ _pytest_version = Version(pytest.__version__)
 PYTEST_GT_5 = _pytest_version > Version('5.9.9')
 PYTEST_GE_5_4 = _pytest_version >= Version('5.4')
 PYTEST_GE_7_0 = _pytest_version >= Version('7.0')
-PYTEST_GE_8_0 = any([_pytest_version.is_devrelease,
+PYTEST_GE_8_0 = _pytest_version >= Version('8.0')
+PYTEST_GE_8_1_1 = _pytest_version >= Version('8.1.1')
+PYTEST_GE_8_2 = any([_pytest_version.is_devrelease,
                      _pytest_version.is_prerelease,
-                     _pytest_version >= Version('8.0')])
+                     _pytest_version >= Version('8.2')])
 
 comment_characters = {
     '.txt': '#',
@@ -119,6 +125,20 @@ def pytest_addoption(parser):
     parser.addoption("--doctest-only", action="store_true",
                      help="Test only doctests. Implies usage of doctest-plus.")
 
+    parser.addoption("--doctest-plus-generate-diff",
+                     help=(
+                         "Generate a diff where expected output and actual "
+                         "output differ.  "
+                         "The diff is printed to stdout if not using "
+                         "`--doctest-plus-generate-diff=overwrite` which "
+                         "causes editing of the original files.\n"
+                         "NOTE: Unless an in-pace build is picked up, python "
+                         "file paths may point to unexpected places. "
+                         "If 'overwrite' is not used, will create a temporary "
+                         "folder and use `git diff -p` to generate a diff."),
+                     choices=["diff", "overwrite"],
+                     action="store", nargs="?", default=False, const="diff")
+
     parser.addini("text_file_format",
                   "Default format for docs. "
                   "This is no longer recommended, use --doctest-glob instead.")
@@ -160,6 +180,11 @@ def pytest_addoption(parser):
                   default=[])
 
 
+def pytest_addhooks(pluginmanager):
+    from pytest_doctestplus import newhooks
+    pluginmanager.add_hookspecs(newhooks)
+
+
 def get_optionflags(parent):
     optionflags_str = parent.config.getini('doctest_optionflags')
     flag_int = 0
@@ -183,8 +208,14 @@ def _is_numpy_ufunc(method):
 
 
 def pytest_configure(config):
-    doctest_plugin = config.pluginmanager.getplugin('doctest')
-    run_regular_doctest = config.option.doctestmodules and not config.option.doctest_plus
+    doctest_plugin = config.pluginmanager.getplugin("doctest")
+    if not hasattr(config.option, "doctestmodules"):
+        return
+    run_regular_doctest = (
+        config.option.doctestmodules and not config.option.doctest_plus
+    )
+    if config.option.doctest_plus_generate_diff:
+        config.option.doctest_only = True
     use_doctest_plus = config.getini(
         'doctest_plus') or config.option.doctest_plus or config.option.doctest_only
     use_doctest_ufunc = config.getini(
@@ -204,12 +235,16 @@ def pytest_configure(config):
     use_rst = config.getini('doctest_rst') or config.option.doctest_rst
     file_ext = config.option.text_file_format or config.getini('text_file_format') or 'rst'
     if use_rst:
-        config.option.doctestglob.append('*.{}'.format(file_ext))
+        config.option.doctestglob.append(f'*.{file_ext}')
 
     # override default comment characters
     ext_comment_pairs = [pair.split('=') for pair in config.getini('text_file_comment_chars')]
     for ext, chars in ext_comment_pairs:
         comment_characters[ext] = chars
+
+    # Fetch the global hook function:
+    global doctestplus_diffhook
+    doctestplus_diffhook = config.hook.pytest_doctestplus_diffhook
 
     class DocTestModulePlus(doctest_plugin.DoctestModule):
         # pytest 2.4.0 defines "collect".  Prior to that, it defined
@@ -228,35 +263,28 @@ def pytest_configure(config):
                 fspath = self.fspath
                 filepath = self.fspath.basename
 
-            if filepath == "setup.py":
+            if filepath in ("setup.py", "__main__.py"):
                 return
-            elif filepath == "conftest.py":
-                if PYTEST_GE_7_0:
-                    module = self.config.pluginmanager._importconftest(
-                        self.path, self.config.getoption("importmode"),
-                        rootpath=self.config.rootpath)
-                elif PYTEST_GT_5:
-                    module = self.config.pluginmanager._importconftest(
-                        self.fspath, self.config.getoption("importmode"))
-                else:
-                    module = self.config.pluginmanager._importconftest(
-                        self.fspath)
-            else:
-                try:
-                    if PYTEST_GT_5:
-                        from _pytest.pathlib import import_path
+            try:
+                if PYTEST_GT_5:
+                    from _pytest.pathlib import import_path
+                    mode = self.config.getoption("importmode")
 
-                    if PYTEST_GE_7_0:
-                        module = import_path(fspath, root=self.config.rootpath)
-                    elif PYTEST_GT_5:
-                        module = import_path(fspath)
-                    else:
-                        module = fspath.pyimport()
-                except ImportError:
-                    if self.config.getvalue("doctest_ignore_import_errors"):
-                        pytest.skip("unable to import module %r" % fspath)
-                    else:
-                        raise
+                if PYTEST_GE_8_1_1:
+                    consider_namespace_packages = self.config.getini("consider_namespace_packages")
+                    module = import_path(fspath, mode=mode, root=self.config.rootpath,
+                                         consider_namespace_packages=consider_namespace_packages)
+                elif PYTEST_GE_7_0:
+                    module = import_path(fspath, mode=mode, root=self.config.rootpath)
+                elif PYTEST_GT_5:
+                    module = import_path(fspath, mode=mode)
+                else:
+                    module = fspath.pyimport()
+            except ImportError:
+                if self.config.getvalue("doctest_ignore_import_errors"):
+                    pytest.skip("unable to import module %r" % fspath)
+                else:
+                    raise
 
             options = get_optionflags(self) | FIX
 
@@ -268,6 +296,7 @@ def pytest_configure(config):
                 checker=OutputChecker(),
                 # Helper disables continue-on-failure when debugging is enabled
                 continue_on_failure=_get_continue_on_failure(config),
+                generate_diff=config.option.doctest_plus_generate_diff,
             )
 
             for test in finder.find(module):
@@ -313,6 +342,7 @@ def pytest_configure(config):
                             test.name, self, runner, test)
 
     class DocTestTextfilePlus(pytest.Module):
+        obj = None
 
         def collect(self):
             if PYTEST_GE_7_0:
@@ -332,6 +362,7 @@ def pytest_configure(config):
             runner = DebugRunnerPlus(
                 verbose=False, optionflags=optionflags, checker=OutputChecker(),
                 continue_on_failure=_get_continue_on_failure(self.config),
+                generate_diff=self.config.option.doctest_plus_generate_diff,
             )
 
             parser = DocTestParserPlus()
@@ -358,10 +389,17 @@ def pytest_configure(config):
              doctest chunk if the given modules/packages are not
              installed.
 
+           - ``.. doctest-requires-all:: module1, module2``: Skip all subsequent
+             doctest chunks if the given modules/packages are not
+             installed.
+
            - ``.. doctest-skip-all``: Skip all subsequent doctests.
 
            - ``.. doctest-remote-data::``: Skip the next doctest chunk if
              --remote-data is not passed.
+
+           - ``.. doctest-remote-data-all::``: Skip all subsequent doctest
+             chunks if --remote-data is not passed.
         """
 
         def parse(self, s, name=None):
@@ -391,10 +429,27 @@ def pytest_configure(config):
 
                 if isinstance(entry, str) and entry:
                     required = []
+                    required_all = []
                     skip_next = False
                     lines = entry.strip().splitlines()
-                    if any(re.match(
-                            '{} doctest-skip-all'.format(comment_char), x.strip()) for x in lines):
+
+                    requires_all_match = [re.match(
+                        fr'{comment_char}\s+doctest-requires-all\s*::\s+(.*)', x) for x in lines]
+                    if any(requires_all_match):
+                        required_all = [re.split(r'\s*[,\s]\s*', match.group(1))
+                                        for match in requires_all_match if match][0]
+                    required_modules_all = DocTestFinderPlus.check_required_modules(required_all)
+                    if not required_modules_all:
+                        skip_all = True
+                        continue
+
+                    if config.getoption('remote_data', 'none') != 'any':
+                        if any(re.match(fr'{comment_char}\s+doctest-remote-data-all\s*::', x.strip())
+                               for x in lines):
+                            skip_all = True
+                            continue
+
+                    if any(re.match(f'{comment_char} doctest-skip-all', x.strip()) for x in lines):
                         skip_all = True
                         continue
 
@@ -405,7 +460,7 @@ def pytest_configure(config):
                     # special environment to be in between, e.g. \begin{python}
                     last_lines = lines[-2:]
                     matches = [re.match(
-                        r'{}\s+doctest-skip\s*::(\s+.*)?'.format(comment_char),
+                        fr'{comment_char}\s+doctest-skip\s*::(\s+.*)?',
                         last_line) for last_line in last_lines]
 
                     if len(matches) > 1:
@@ -423,7 +478,7 @@ def pytest_configure(config):
 
                     if config.getoption('remote_data', 'none') != 'any':
                         matches = (re.match(
-                            r'{}\s+doctest-remote-data\s*::'.format(comment_char),
+                            fr'{comment_char}\s+doctest-remote-data\s*::',
                             last_line) for last_line in last_lines)
 
                         if any(matches):
@@ -431,7 +486,7 @@ def pytest_configure(config):
                             continue
 
                     matches = [re.match(
-                        r'{}\s+doctest-requires\s*::\s+(.*)'.format(comment_char),
+                        fr'{comment_char}\s+doctest-requires\s*::\s+(.*)',
                         last_line) for last_line in last_lines]
 
                     if len(matches) > 1:
@@ -487,7 +542,7 @@ def pytest_configure(config):
     config.pluginmanager.unregister(doctest_plugin)
 
 
-class DoctestPlus(object):
+class DoctestPlus:
     def __init__(self, doctest_module_item_cls, doctest_textfile_item_cls, file_globs):
         """
         doctest_module_item_cls should be a class inheriting
@@ -503,143 +558,265 @@ class DoctestPlus(object):
         # Directories to ignore when adding doctests
         self._ignore_paths = []
 
-    def pytest_ignore_collect(self, path, config):
-        """
-        Skip paths that match any of the doctest_norecursedirs patterns or
-        if doctest_only is True then skip all regular test files (eg test_*.py).
-        """
-        if PYTEST_GE_8_0:
-            dirpath = Path(path).parent
-            collect_ignore = config._getconftest_pathlist("collect_ignore",
-                                                          path=dirpath)
-        elif PYTEST_GE_7_0:
-            dirpath = Path(path).parent
-            collect_ignore = config._getconftest_pathlist("collect_ignore",
-                                                          path=dirpath,
-                                                          rootpath=config.rootpath)
-        else:
-            dirpath = path.dirpath()
-            collect_ignore = config._getconftest_pathlist("collect_ignore", path=dirpath)
+    if PYTEST_GE_8_0:
 
-        # The collect_ignore conftest.py variable should cause all test
-        # runners to ignore this file and all subfiles and subdirectories
-        if collect_ignore is not None and path in collect_ignore:
-            return True
+        def pytest_ignore_collect(self, collection_path, config):
+            """
+            Skip paths that match any of the doctest_norecursedirs patterns or
+            if doctest_only is True then skip all regular test files (eg test_*.py).
+            """
+            from _pytest.pathlib import fnmatch_ex
 
-        if config.option.doctest_only:
-            for pattern in config.getini('python_files'):
+            collect_ignore = config._getconftest_pathlist("collect_ignore",
+                                                          path=collection_path.parent)
+
+            # The collect_ignore conftest.py variable should cause all test
+            # runners to ignore this file and all subfiles and subdirectories
+            if collect_ignore is not None and collection_path in collect_ignore:
+                return True
+
+            if config.option.doctest_only:
+                for pattern in config.getini('python_files'):
+                    if fnmatch_ex(pattern, collection_path):
+                        return True
+
+            def get_list_opt(name):
+                return getattr(config.option, name, None) or []
+
+            for ignore_path in get_list_opt('ignore'):
+                ignore_path = os.path.abspath(ignore_path)
+                if str(collection_path).startswith(ignore_path):
+                    return True
+
+            for pattern in get_list_opt('ignore_glob'):
+                if fnmatch_ex(pattern, collection_path):
+                    return True
+
+            for pattern in config.getini("doctest_norecursedirs"):
+                if fnmatch_ex(pattern, collection_path):
+                    # Apparently pytest_ignore_collect causes files not to be
+                    # collected by any test runner; for DoctestPlus we only want to
+                    # avoid creating doctest nodes for them
+                    self._ignore_paths.append(collection_path)
+                    break
+
+            for option in config.getini("doctest_subpackage_requires"):
+                subpackage_pattern, required = option.split('=', 1)
+                if fnmatch_ex(subpackage_pattern.strip(), collection_path):
+                    required = required.strip().split(';')
+                    if not DocTestFinderPlus.check_required_modules(required):
+                        self._ignore_paths.append(collection_path)
+                        break
+
+            # Let other plugins decide the outcome.
+            return None
+
+        def pytest_collect_file(self, file_path, parent):
+            """Implements an enhanced version of the doctest module from py.test
+            (specifically, as enabled by the --doctest-modules option) which
+            supports skipping all doctests in a specific docstring by way of a
+            special ``__doctest_skip__`` module-level variable.  It can also skip
+            tests that have special requirements by way of
+            ``__doctest_requires__``.
+
+            ``__doctest_skip__`` should be a list of functions, classes, or class
+            methods whose docstrings should be ignored when collecting doctests.
+
+            This also supports wildcard patterns.  For example, to run doctests in
+            a class's docstring, but skip all doctests in its modules use, at the
+            module level::
+
+                __doctest_skip__ = ['ClassName.*']
+
+            You may also use the string ``'.'`` in ``__doctest_skip__`` to refer
+            to the module itself, in case its module-level docstring contains
+            doctests.
+
+            ``__doctest_requires__`` should be a dictionary mapping wildcard
+            patterns (in the same format as ``__doctest_skip__``) to a list of one
+            or more modules that should be *importable* in order for the tests to
+            run.  For example, if some tests require the scipy module to work they
+            will be skipped unless ``import scipy`` is possible.  It is also
+            possible to use a tuple of wildcard patterns as a key in this dict::
+
+                __doctest_requires__ = {('func1', 'func2'): ['scipy']}
+
+            """
+            from _pytest.pathlib import commonpath, fnmatch_ex
+
+            for ignore_path in self._ignore_paths:
+                if commonpath(ignore_path, file_path) == ignore_path:
+                    return None
+
+            if file_path.suffix == '.py':
+                if file_path.name == 'conf.py':
+                    return None
+
+                # Don't override the built-in doctest plugin
+                return self._doctest_module_item_cls.from_parent(parent, path=file_path)
+
+            elif any([fnmatch_ex(pat, file_path) for pat in self._file_globs]):
+                # Ignore generated .rst files
+                parts = str(file_path).split(os.path.sep)
+
+                # Don't test files that start with a _
+                if file_path.name.startswith('_'):
+                    return None
+
+                # Don't test files in directories that start with a '_' if those
+                # directories are inside docs. Note that we *should* allow for
+                # example /tmp/_q/docs/file.rst but not /tmp/docs/_build/file.rst
+                # If we don't find 'docs' in the path, we should just skip this
+                # check to be safe. We also want to skip any api sub-directory
+                # of docs.
+                if 'docs' in parts:
+                    # We index from the end on the off chance that the temporary
+                    # directory includes 'docs' in the path, e.g.
+                    # /tmp/docs/371j/docs/index.rst You laugh, but who knows! :)
+                    # Also, it turns out lists don't have an rindex method. Huh??!!
+                    docs_index = len(parts) - 1 - parts[::-1].index('docs')
+                    if any(x.startswith('_') or x == 'api' for x in parts[docs_index:]):
+                        return None
+
+                # TODO: Get better names on these items when they are
+                # displayed in py.test output
+                return self._doctest_textfile_item_cls.from_parent(parent, path=file_path)
+
+    else:  # PYTEST_LT_8
+
+        def pytest_ignore_collect(self, path, config):
+            """
+            Skip paths that match any of the doctest_norecursedirs patterns or
+            if doctest_only is True then skip all regular test files (eg test_*.py).
+            """
+            if PYTEST_GE_7_0:
+                dirpath = Path(path).parent
+                collect_ignore = config._getconftest_pathlist("collect_ignore",
+                                                              path=dirpath,
+                                                              rootpath=config.rootpath)
+            else:
+                dirpath = path.dirpath()
+                collect_ignore = config._getconftest_pathlist("collect_ignore", path=dirpath)
+
+            # The collect_ignore conftest.py variable should cause all test
+            # runners to ignore this file and all subfiles and subdirectories
+            if collect_ignore is not None and path in collect_ignore:
+                return True
+
+            if config.option.doctest_only:
+                for pattern in config.getini('python_files'):
+                    if path.check(fnmatch=pattern):
+                        return True
+
+            def get_list_opt(name):
+                return getattr(config.option, name, None) or []
+
+            for ignore_path in get_list_opt('ignore'):
+                ignore_path = os.path.abspath(ignore_path)
+                if str(path).startswith(ignore_path):
+                    return True
+
+            for pattern in get_list_opt('ignore_glob'):
                 if path.check(fnmatch=pattern):
                     return True
 
-        def get_list_opt(name):
-            return getattr(config.option, name, None) or []
-
-        for ignore_path in get_list_opt('ignore'):
-            ignore_path = os.path.abspath(ignore_path)
-            if str(path).startswith(ignore_path):
-                return True
-
-        for pattern in get_list_opt('ignore_glob'):
-            if path.check(fnmatch=pattern):
-                return True
-
-        for pattern in config.getini("doctest_norecursedirs"):
-            if path.check(fnmatch=pattern):
-                # Apparently pytest_ignore_collect causes files not to be
-                # collected by any test runner; for DoctestPlus we only want to
-                # avoid creating doctest nodes for them
-                self._ignore_paths.append(path)
-                break
-
-        for option in config.getini("doctest_subpackage_requires"):
-            subpackage_pattern, required = option.split('=', 1)
-            if path.check(fnmatch=subpackage_pattern.strip()):
-                required = required.strip().split(';')
-                if not DocTestFinderPlus.check_required_modules(required):
+            for pattern in config.getini("doctest_norecursedirs"):
+                if path.check(fnmatch=pattern):
+                    # Apparently pytest_ignore_collect causes files not to be
+                    # collected by any test runner; for DoctestPlus we only want to
+                    # avoid creating doctest nodes for them
                     self._ignore_paths.append(path)
                     break
 
-        # Let other plugins decide the outcome.
-        return None
+            for option in config.getini("doctest_subpackage_requires"):
+                subpackage_pattern, required = option.split('=', 1)
+                if path.check(fnmatch=subpackage_pattern.strip()):
+                    required = required.strip().split(';')
+                    if not DocTestFinderPlus.check_required_modules(required):
+                        self._ignore_paths.append(path)
+                        break
 
-    def pytest_collect_file(self, path, parent):
-        """Implements an enhanced version of the doctest module from py.test
-        (specifically, as enabled by the --doctest-modules option) which
-        supports skipping all doctests in a specific docstring by way of a
-        special ``__doctest_skip__`` module-level variable.  It can also skip
-        tests that have special requirements by way of
-        ``__doctest_requires__``.
+            # Let other plugins decide the outcome.
+            return None
 
-        ``__doctest_skip__`` should be a list of functions, classes, or class
-        methods whose docstrings should be ignored when collecting doctests.
+        def pytest_collect_file(self, path, parent):
+            """Implements an enhanced version of the doctest module from py.test
+            (specifically, as enabled by the --doctest-modules option) which
+            supports skipping all doctests in a specific docstring by way of a
+            special ``__doctest_skip__`` module-level variable.  It can also skip
+            tests that have special requirements by way of
+            ``__doctest_requires__``.
 
-        This also supports wildcard patterns.  For example, to run doctests in
-        a class's docstring, but skip all doctests in its modules use, at the
-        module level::
+            ``__doctest_skip__`` should be a list of functions, classes, or class
+            methods whose docstrings should be ignored when collecting doctests.
 
-            __doctest_skip__ = ['ClassName.*']
+            This also supports wildcard patterns.  For example, to run doctests in
+            a class's docstring, but skip all doctests in its modules use, at the
+            module level::
 
-        You may also use the string ``'.'`` in ``__doctest_skip__`` to refer
-        to the module itself, in case its module-level docstring contains
-        doctests.
+                __doctest_skip__ = ['ClassName.*']
 
-        ``__doctest_requires__`` should be a dictionary mapping wildcard
-        patterns (in the same format as ``__doctest_skip__``) to a list of one
-        or more modules that should be *importable* in order for the tests to
-        run.  For example, if some tests require the scipy module to work they
-        will be skipped unless ``import scipy`` is possible.  It is also
-        possible to use a tuple of wildcard patterns as a key in this dict::
+            You may also use the string ``'.'`` in ``__doctest_skip__`` to refer
+            to the module itself, in case its module-level docstring contains
+            doctests.
 
-            __doctest_requires__ = {('func1', 'func2'): ['scipy']}
+            ``__doctest_requires__`` should be a dictionary mapping wildcard
+            patterns (in the same format as ``__doctest_skip__``) to a list of one
+            or more modules that should be *importable* in order for the tests to
+            run.  For example, if some tests require the scipy module to work they
+            will be skipped unless ``import scipy`` is possible.  It is also
+            possible to use a tuple of wildcard patterns as a key in this dict::
 
-        """
-        for ignore_path in self._ignore_paths:
-            if ignore_path.common(path) == ignore_path:
-                return None
+                __doctest_requires__ = {('func1', 'func2'): ['scipy']}
 
-        if path.ext == '.py':
-            if path.basename == 'conf.py':
-                return None
-
-            # Don't override the built-in doctest plugin
-            if PYTEST_GE_7_0:
-                return self._doctest_module_item_cls.from_parent(parent, path=Path(path))
-            elif PYTEST_GE_5_4:
-                return self._doctest_module_item_cls.from_parent(parent, fspath=path)
-            else:
-                return self._doctest_module_item_cls(path, parent)
-
-        elif any([path.check(fnmatch=pat) for pat in self._file_globs]):
-            # Ignore generated .rst files
-            parts = str(path).split(os.path.sep)
-
-            # Don't test files that start with a _
-            if path.basename.startswith('_'):
-                return None
-
-            # Don't test files in directories that start with a '_' if those
-            # directories are inside docs. Note that we *should* allow for
-            # example /tmp/_q/docs/file.rst but not /tmp/docs/_build/file.rst
-            # If we don't find 'docs' in the path, we should just skip this
-            # check to be safe. We also want to skip any api sub-directory
-            # of docs.
-            if 'docs' in parts:
-                # We index from the end on the off chance that the temporary
-                # directory includes 'docs' in the path, e.g.
-                # /tmp/docs/371j/docs/index.rst You laugh, but who knows! :)
-                # Also, it turns out lists don't have an rindex method. Huh??!!
-                docs_index = len(parts) - 1 - parts[::-1].index('docs')
-                if any(x.startswith('_') or x == 'api' for x in parts[docs_index:]):
+            """
+            for ignore_path in self._ignore_paths:
+                if ignore_path.common(path) == ignore_path:
                     return None
 
-            # TODO: Get better names on these items when they are
-            # displayed in py.test output
-            if PYTEST_GE_7_0:
-                return self._doctest_textfile_item_cls.from_parent(parent, path=Path(path))
-            elif PYTEST_GE_5_4:
-                return self._doctest_textfile_item_cls.from_parent(parent, fspath=path)
-            else:
-                return self._doctest_textfile_item_cls(path, parent)
+            if path.ext == '.py':
+                if path.basename == 'conf.py':
+                    return None
+
+                # Don't override the built-in doctest plugin
+                if PYTEST_GE_7_0:
+                    return self._doctest_module_item_cls.from_parent(parent, path=Path(path))
+                elif PYTEST_GE_5_4:
+                    return self._doctest_module_item_cls.from_parent(parent, fspath=path)
+                else:
+                    return self._doctest_module_item_cls(path, parent)
+
+            elif any([path.check(fnmatch=pat) for pat in self._file_globs]):
+                # Ignore generated .rst files
+                parts = str(path).split(os.path.sep)
+
+                # Don't test files that start with a _
+                if path.basename.startswith('_'):
+                    return None
+
+                # Don't test files in directories that start with a '_' if those
+                # directories are inside docs. Note that we *should* allow for
+                # example /tmp/_q/docs/file.rst but not /tmp/docs/_build/file.rst
+                # If we don't find 'docs' in the path, we should just skip this
+                # check to be safe. We also want to skip any api sub-directory
+                # of docs.
+                if 'docs' in parts:
+                    # We index from the end on the off chance that the temporary
+                    # directory includes 'docs' in the path, e.g.
+                    # /tmp/docs/371j/docs/index.rst You laugh, but who knows! :)
+                    # Also, it turns out lists don't have an rindex method. Huh??!!
+                    docs_index = len(parts) - 1 - parts[::-1].index('docs')
+                    if any(x.startswith('_') or x == 'api' for x in parts[docs_index:]):
+                        return None
+
+                # TODO: Get better names on these items when they are
+                # displayed in py.test output
+                if PYTEST_GE_7_0:
+                    return self._doctest_textfile_item_cls.from_parent(parent, path=Path(path))
+                elif PYTEST_GE_5_4:
+                    return self._doctest_textfile_item_cls.from_parent(parent, fspath=path)
+                else:
+                    return self._doctest_textfile_item_cls(path, parent)
 
 
 class DocTestFinderPlus(doctest.DocTestFinder):
@@ -673,6 +850,7 @@ class DocTestFinderPlus(doctest.DocTestFinder):
             if mod in cls._import_cache:
                 if not cls._import_cache[mod]:
                     return False
+                continue
 
             if cls._module_checker.check(mod):
                 cls._import_cache[mod] = True
@@ -714,9 +892,17 @@ class DocTestFinderPlus(doctest.DocTestFinder):
                 for pats, mods in reqs.items():
                     if not isinstance(pats, tuple):
                         pats = (pats,)
+
                     for pat in pats:
-                        if not fnmatch.fnmatch(test.name, '.'.join((name, pat))):
-                            continue
+                        if pat == '*':
+                            pass
+                        elif pat == '.' and test.name == name:
+                            pass
+                        elif fnmatch.fnmatch(test.name, '.'.join((name, pat))):
+                            pass
+                        else:
+                            continue  # The pattern does not apply
+
                         if not self.check_required_modules(mods):
                             return False
                 return True
@@ -726,12 +912,146 @@ class DocTestFinderPlus(doctest.DocTestFinder):
         return tests
 
 
+def write_modified_file(fname, new_fname, changes):
+    # Sort in reversed order to edit the lines:
+    bad_tests = []
+    changes.sort(key=lambda x: (x["test_lineno"], x["example_lineno"]),
+                 reverse=True)
+
+    with open(fname) as f:
+        text = f.readlines()
+
+    for change in changes:
+        if change["test_lineno"] is None:
+            bad_tests.append(change["name"])
+            continue
+        # Find the first line of the output:
+        lineno = change["test_lineno"] + change["example_lineno"]
+        lineno += change["source"].count("\n")
+
+        indentation = len(text[lineno-1]) - len(text[lineno-1].lstrip())
+        indentation = text[lineno-1][:indentation]
+        want = indent(change["want"], indentation, lambda x: True)
+        # Replace fully blank lines with the required `<BLANKLINE>`
+        # (May need to do this also if line contains only whitespace)
+        got = change["got"].replace("\n\n", "\n<BLANKLINE>\n")
+        got = indent(got, indentation, lambda x: True)
+
+        text[lineno:lineno+want.count("\n")] = [got]
+
+    with open(new_fname, "w") as f:
+        f.write("".join(text))
+
+    return bad_tests
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    changesets = DebugRunnerPlus._changesets
+    diff_mode = DebugRunnerPlus._generate_diff
+    DebugRunnerPlus._changesets = defaultdict(list)
+    DebugRunnerPlus._generate_diff = None
+    all_bad_tests = []
+    if not diff_mode:
+        return  # we do not report or apply diffs
+
+    if diff_mode != "overwrite":
+        # In this mode, we write a corrected file to a temporary folder in
+        # order to compare them (rather than modifying the file).
+        terminalreporter.section("Reporting DoctestPlus Diffs")
+        if not changesets:
+            terminalreporter.write_line("No doc changes to show")
+            return
+
+        # Strip away the common part of the path to make it a bit clearner...
+        common_path = os.path.commonpath(changesets.keys())
+        if not os.path.isdir(common_path):
+            common_path = os.path.split(common_path)[0]
+
+        with tempfile.TemporaryDirectory() as tmpdirname:
+            for fname, changes in changesets.items():
+                # Create a new filename and ensure the path exists (in the
+                # temporary directory).
+                new_fname = fname.replace(common_path, tmpdirname)
+                os.makedirs(os.path.split(new_fname)[0], exist_ok=True)
+
+                bad_tests = write_modified_file(fname, new_fname, changes)
+                all_bad_tests.extend(bad_tests)
+
+                # git diff returns 1 to signal changes, so just ignore the
+                # exit status:
+                with subprocess.Popen(
+                        ["git", "diff", "-p", "--no-index", fname, new_fname],
+                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as p:
+                    p.wait()
+                    # Diff should be fine, but write error if not:
+                    diff = p.stderr.read()
+                    diff += p.stdout.read()
+
+                    # hide the temporary directory (cleaning up anyway):
+                    if not os.path.isabs(common_path):
+                        diff = diff.replace(tmpdirname, "/" + common_path)
+                    else:
+                        # diff seems to not include extra /
+                        diff = diff.replace(tmpdirname, common_path)
+                    terminalreporter.write(diff)
+                    terminalreporter.write_line(f"{tmpdirname}, {common_path}")
+
+                terminalreporter.section("Files with modifications", "-")
+                terminalreporter.write_line(
+                    "The following files would be overwritten with "
+                    "`--doctest-plus-generate-diff=overwrite`:")
+                for fname in changesets:
+                    terminalreporter.write_line(f"    {fname}")
+                terminalreporter.write_line(
+                    "make sure these file paths are correct before calling it!")
+    else:
+        # We are in overwrite mode so will write the modified version directly
+        # back into the same file and only report which files were changed.
+        terminalreporter.section("DoctestPlus Fixing File Docs")
+        if not changesets:
+            terminalreporter.write_line("No doc changes to apply")
+            return
+        terminalreporter.write_line("Applied fix to the following files:")
+        for fname, changes in changesets.items():
+            bad_tests = write_modified_file(fname, fname, changes)
+            all_bad_tests.extend(bad_tests)
+            terminalreporter.write_line(f"    {fname}")
+
+    if all_bad_tests:
+        terminalreporter.section("Broken Linenumbers", "-")
+        terminalreporter.write_line(
+            "Doctestplus was unable to fix the following tests "
+            "(their source is hidden or `__module__` overridden?)")
+        for bad_test in all_bad_tests:
+            terminalreporter.write_line(f"    {bad_test}")
+        terminalreporter.write_line(
+            "You can implementing a hook function to fix this (see README).")
+
+
 class DebugRunnerPlus(doctest.DebugRunner):
-    def __init__(self, checker=None, verbose=None, optionflags=0, continue_on_failure=True):
+    _changesets = defaultdict(list)
+    _generate_diff = False
+
+    def __init__(self, checker=None, verbose=None, optionflags=0,
+                 continue_on_failure=True, generate_diff=False):
+        # generated_diff is False, "diff", or "overwrite" (only need truthiness)
+        DebugRunnerPlus._generate_diff = generate_diff
+
         super().__init__(checker=checker, verbose=verbose, optionflags=optionflags)
         self.continue_on_failure = continue_on_failure
 
+    def report_success(self, out, test, example, got):
+        if self._generate_diff:
+            self.track_diff(False, out, test, example, got)
+            return
+
+        return super().report_success(out, test, example, got)
+
     def report_failure(self, out, test, example, got):
+        if self._generate_diff:
+            self.track_diff(True, out, test, example, got)
+            return
+
         failure = doctest.DocTestFailure(test, example, got)
         if self.continue_on_failure:
             out.append(failure)
@@ -747,3 +1067,17 @@ class DebugRunnerPlus(doctest.DebugRunner):
             out.append(failure)
         else:
             raise failure
+
+    def track_diff(self, use, out, test, example, got):
+        if example.want == got:
+            return
+
+        info = dict(use=use, name=test.name, filename=test.filename,
+                    source=example.source, nindent=example.indent,
+                    want=example.want, got=got, test_lineno=test.lineno,
+                    example_lineno=example.lineno)
+        doctestplus_diffhook(info=info)
+        if not info["use"]:
+            return
+
+        self._changesets[info["filename"]].append(info)

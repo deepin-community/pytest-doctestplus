@@ -1,5 +1,23 @@
 Test-Command: debian/tests/run-pytest --doctest-plus
-Depends: @, gcc, python3-all-dev, python3-pip, python3-docutils, python3-numpy, python3-pytest-remotedata
+Depends: gcc,
+         git,
+         python3-all-dev,
+         python3-docutils,
+         python3-numpy,
+         python3-pip,
+         python3-pytest-remotedata,
+         python3-setuptools,
+         @
+Restrictions: needs-internet
 
 Test-Command: debian/tests/run-pytest --doctest-plus --doctest-rst
-Depends: @, gcc, python3-all-dev, python3-pip, python3-docutils, python3-numpy, python3-pytest-remotedata
+Depends: gcc,
+         git,
+         python3-all-dev,
+         python3-docutils,
+         python3-numpy,
+         python3-pip,
+         python3-pytest-remotedata,
+         python3-setuptools,
+         @
+Restrictions: needs-internet
