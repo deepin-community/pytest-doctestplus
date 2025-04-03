@@ -1,3 +1,54 @@
+1.4.0 (2025-01-24)
+==================
+
+- Fixing compatibility with pytest-asyncio. [#278]
+
+- Adding new directive ``doctest-requires-all`` to conditionally skip all
+  doctests in narrative documentations based on availability of
+  dependencies. [#280]
+
+- Adding new directive ``doctest-remote-data-all`` to conditionally skip all
+  doctests in narrative documentations based on availability of
+  remote-data. [#281]
+
+- Versions of Python <3.9 are no longer supported. [#274]
+
+1.3.0 (2024-11-25)
+==================
+
+- Fixing output update for multiline code. [#253]
+
+- Fixing Python 3.13 compatibility. [#260]
+
+- Dropped ``setuptools`` as a runtime dependency. [#258]
+
+- Fixing bug of assuming doctestmodules exists on Namespace. [#271]
+
+1.2.1 (2024-03-09)
+==================
+
+- Compatibility with pytest 8.1.1 [#241, #242]
+
+1.2.0 (2024-03-04)
+==================
+
+- Compatibility with pytest 8.1. [#236, #238]
+
+1.1.0 (2023-12-13)
+==================
+
+- Added ``--doctest-plus-generate-diff`` to update documentation based on
+  actual output. [#227]
+
+- Fix module level ``__doctest_requires__``. [#228]
+
+- Versions of Python <3.8 are no longer supported. [#217]
+
+- Fix erroneous attempt to import ``__main__.py`` by skipping it. [#232]
+
+- Respect pytest ``--import-mode``. [#233]
+
+
 1.0.0 (2023-08-11)
 ==================
 
@@ -69,7 +120,7 @@
 0.9.0 (2021-01-14)
 ==================
 
-- Declare ``setuptools`` runtime dependency [#93]
+- Declare ``setuptools`` runtime dependency. [#132]
 
 - Add ``SHOW_WARNINGS`` flag to show warnings. [#136]
 
